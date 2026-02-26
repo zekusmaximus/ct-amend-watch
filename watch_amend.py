@@ -9,9 +9,45 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import TimeoutError as PWTimeoutError
 from playwright.sync_api import sync_playwright
 
+
+def load_dotenv_file(filename: str = ".env"):
+    """
+    Minimal .env loader:
+    - Reads KEY=VALUE pairs from a file next to this script.
+    - Ignores blank lines and comments.
+    - Does not overwrite already-set environment variables.
+    """
+    env_path = os.path.join(os.path.dirname(__file__), filename)
+    if not os.path.exists(env_path):
+        return
+
+    with open(env_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key:
+                continue
+
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+
+            os.environ.setdefault(key, value)
+
+
+load_dotenv_file()
+
 # === Config ===
-HOUSE_URL = "https://www.cga.ct.gov/asp/CGAAmendProc/CGAHouseAmendReport.asp"
-SENATE_URL = "https://www.cga.ct.gov/asp/CGAAmendProc/CGASenateAmendReport.asp"
+HOUSE_URL = "https://www.cga.ct.gov/asp/CGAAmendProc/CGAHouseAmendRptDisp.asp?optSortby=D&optSortOrder=Desc"
+SENATE_URL = "https://www.cga.ct.gov/asp/CGAAmendProc/CGASenateAmendRptDisp.asp?optSortby=D&optSortOrder=Desc"
 
 # CGA Bill Status (we'll construct this directly from Bill # like SB00298 / HB05032)
 BILL_STATUS_BASE = "https://www.cga.ct.gov/asp/CGABillStatus/cgabillstatus.asp"

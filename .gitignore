@@ -1,0 +1,20 @@
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Local env/secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime state
+state.json
+
+# Editor cruft
+.DS_Store
+Thumbs.db
