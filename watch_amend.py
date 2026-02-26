@@ -69,11 +69,37 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+def default_state():
+    return {
+        "house_last_lco": norm(os.environ.get("CT_HOUSE_LAST_LCO", "")) or None,
+        "senate_last_lco": norm(os.environ.get("CT_SENATE_LAST_LCO", "")) or None,
+    }
+
+
 def load_state():
+    defaults = default_state()
     if not os.path.exists(STATE_PATH):
-        return {"house_last_lco": None, "senate_last_lco": None}
-    with open(STATE_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return defaults
+
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return defaults
+
+    if not isinstance(data, dict):
+        return defaults
+
+    merged = {
+        "house_last_lco": data.get("house_last_lco", defaults["house_last_lco"]),
+        "senate_last_lco": data.get("senate_last_lco", defaults["senate_last_lco"]),
+    }
+    for key in ("house_last_lco", "senate_last_lco"):
+        val = merged.get(key)
+        merged[key] = norm(str(val)) if val is not None else None
+        if not merged[key]:
+            merged[key] = None
+    return merged
 
 
 def save_state(state):
