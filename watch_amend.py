@@ -9,26 +9,28 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import TimeoutError as PWTimeoutError
 from playwright.sync_api import sync_playwright
 
+# === Config ===
 HOUSE_URL = "https://www.cga.ct.gov/asp/CGAAmendProc/CGAHouseAmendReport.asp"
 SENATE_URL = "https://www.cga.ct.gov/asp/CGAAmendProc/CGASenateAmendReport.asp"
+
+# CGA Bill Status (we'll construct this directly from Bill # like SB00298 / HB05032)
+BILL_STATUS_BASE = "https://www.cga.ct.gov/asp/CGABillStatus/cgabillstatus.asp"
+SESSION_YEAR = int(os.environ.get("CT_SESSION_YEAR", "2026"))
 
 STATE_PATH = os.environ.get(
     "CT_AMEND_STATE_PATH",
     os.path.join(os.path.dirname(__file__), "state.json"),
 )
 
-USER_AGENT = "ct-amend-watcher/1.3 (+playwright)"
+USER_AGENT = "ct-amend-watcher/1.4 (+playwright)"
 
 DEBUG = os.environ.get("CT_AMEND_DEBUG", "0") == "1"
 REQUIRE_TELEGRAM = os.environ.get("CT_REQUIRE_TELEGRAM", "0") == "1"
 
-# Your screenshot confirms columns like:
-# "Cal. # | LCO # | Bill # | Date Rec. | Sched. Ltr."
-HEADER_NORMALIZE_RE = re.compile(r"\s+", re.UNICODE)
 
-
+# === Helpers ===
 def norm(s: str) -> str:
-    return HEADER_NORMALIZE_RE.sub(" ", (s or "").strip())
+    return re.sub(r"\s+", " ", (s or "").strip())
 
 
 def load_state():
@@ -86,55 +88,47 @@ def goto_with_retry(page, url: str, tries: int = 3, timeout_ms: int = 30000):
     raise last
 
 
-def safe_click_any(page, locators, timeout_ms: int = 1500) -> bool:
-    for locator in locators:
-        try:
-            locator.click(timeout=timeout_ms)
-            return True
-        except Exception:
-            continue
-    return False
-
-
 def click_sort_date_desc(page):
     """
-    Attempts to click UI controls for Date + Descending.
-    Not required for correctness because we also sort in Python,
-    but harmless if present.
+    Optional: tries to click Date + Descending on the page.
+    We DO NOT depend on this; we also sort in Python.
     """
     page.wait_for_load_state("domcontentloaded")
     page.wait_for_timeout(200)
 
+    def safe_click_any(locators, timeout_ms: int = 1500) -> bool:
+        for locator in locators:
+            try:
+                locator.click(timeout=timeout_ms)
+                return True
+            except Exception:
+                continue
+        return False
+
     _ = safe_click_any(
-        page,
         [
             page.get_by_role("link", name=re.compile(r"^\s*date\s*$", re.I)),
             page.get_by_role("button", name=re.compile(r"^\s*date\s*$", re.I)),
             page.get_by_text(re.compile(r"^\s*date\s*$", re.I)).first,
             page.locator("text=Date").first,
-        ],
+        ]
     )
 
     page.wait_for_timeout(200)
 
     _ = safe_click_any(
-        page,
         [
             page.get_by_role("link", name=re.compile(r"descending", re.I)),
             page.get_by_role("button", name=re.compile(r"descending", re.I)),
             page.get_by_text(re.compile(r"descending", re.I)).first,
             page.locator("text=Descending").first,
-        ],
+        ]
     )
 
-    page.wait_for_timeout(300)
+    page.wait_for_timeout(250)
 
 
 def parse_mmddyyyy(s: str):
-    """
-    Returns (yyyy, mm, dd) tuple for sorting, or (0,0,0) if invalid.
-    Accepts m/d/yyyy or mm/dd/yy.
-    """
     s = norm(s)
     m = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{2,4})$", s)
     if not m:
@@ -147,152 +141,64 @@ def parse_mmddyyyy(s: str):
     return (yy, mm, dd)
 
 
-def find_report_table(page):
+def bill_status_url_from_bill(bill: str) -> str:
     """
-    Find the amendment report table by detecting headers.
-    We specifically look for headers including "LCO" and "Bill" and "Date".
+    bill is like SB00298 or HB05032 (letters + 5 digits).
+    CGA accepts bill_num=<bill> and which_year=<session>.
     """
-    tables = page.locator("table")
-    tcount = tables.count()
-    if tcount == 0:
-        return None, None
+    bill = norm(bill)
+    # Defensive: allow SB9 style too, but your report shows SB00298 format.
+    return f"{BILL_STATUS_BASE}?selBillType=Bill&bill_num={bill}&which_year={SESSION_YEAR}"
 
-    best = None
-    best_headers = None
-    best_score = -1
 
-    for i in range(tcount):
-        t = tables.nth(i)
-        try:
-            header_row = t.locator("tr").first
-            headers = header_row.locator("th, td")
-            hc = headers.count()
-            if hc < 3:
-                continue
+# Your “descending date order” view looks like tabular text:
+# Cal. #  LCO #  Bill #   Date Rec.  Sched. Ltr.
+# 0       2284   SB00299  2/25/2026  A
+#
+# We'll parse the BODY INNER TEXT, which avoids relying on HTML table structure.
+ROW_RE = re.compile(
+    r"^\s*(\d+)\s+(\d{1,6})\s+([A-Z]{2}\d{5})\s+(\d{1,2}/\d{1,2}/\d{4})\s*([A-Z])?\s*$"
+)
 
-            header_texts = [norm(headers.nth(j).inner_text()) for j in range(hc)]
-            header_join = " | ".join(h.lower() for h in header_texts)
 
-            # Score presence of expected header tokens
-            score = 0
-            if "lco" in header_join:
-                score += 10
-            if "bill" in header_join:
-                score += 10
-            if "date" in header_join:
-                score += 5
-            if "cal" in header_join:
-                score += 2
-            if "sched" in header_join:
-                score += 1
+def extract_rows_from_report_text(page, base_url: str):
+    """
+    Extract amendment rows by parsing visible text.
+    Returns dicts: lco, bill_label, bill_status_url, date_text, sched_letter, row_text
+    """
+    body_text = page.locator("body").inner_text()
+    lines = [ln.rstrip() for ln in body_text.splitlines() if ln.strip()]
 
-            # plus row count
-            score += min(t.locator("tr").count(), 200)
-
-            if score > best_score:
-                best_score = score
-                best = t
-                best_headers = header_texts
-        except Exception:
+    rows = []
+    for ln in lines:
+        m = ROW_RE.match(ln)
+        if not m:
             continue
 
-    return best, best_headers
+        cal_no = m.group(1)  # unused but available
+        lco = m.group(2)
+        bill = m.group(3)
+        date_text = m.group(4)
+        sched = (m.group(5) or "").strip()
 
-
-def header_index(headers, needle_patterns):
-    """
-    headers: list[str] (as displayed)
-    needle_patterns: list[regex] searched in normalized lower header
-    """
-    if not headers:
-        return None
-    lower = [norm(h).lower() for h in headers]
-    for idx, h in enumerate(lower):
-        for pat in needle_patterns:
-            if re.search(pat, h):
-                return idx
-    return None
-
-
-def extract_rows_from_report(page, base_url: str):
-    """
-    DOM-driven extraction from the report table.
-    Returns rows:
-      - lco (string digits)
-      - bill_status_url (absolute) from hyperlink on Bill #
-      - bill_label (e.g., SB00298 as displayed)
-      - date_text (e.g., 2/25/2026)
-      - row_text (fallback)
-    """
-    table, headers = find_report_table(page)
-    if table is None:
-        return []
-
-    lco_idx = header_index(headers, [r"\blco\b"])
-    bill_idx = header_index(headers, [r"\bbill\b"])
-    date_idx = header_index(headers, [r"\bdate\b"])
-
-    # Your example guarantees these exist; if not, bail so we don't mis-parse.
-    if lco_idx is None or bill_idx is None or date_idx is None:
-        if DEBUG:
-            print("[debug] Could not locate required columns. Headers:", headers)
-        return []
-
-    out = []
-    rows = table.locator("tr")
-    rc = rows.count()
-
-    # Assume first row is header
-    for ri in range(1, rc):
-        r = rows.nth(ri)
-        cells = r.locator("td")
-        cc = cells.count()
-        if cc == 0:
-            continue
-
-        # Some tables may have fewer cells on spacer rows; skip
-        if max(lco_idx, bill_idx, date_idx) >= cc:
-            continue
-
-        lco_raw = norm(cells.nth(lco_idx).inner_text())
-        lco_m = re.search(r"(\d+)", lco_raw)
-        if not lco_m:
-            continue
-        lco = lco_m.group(1)
-
-        bill_cell = cells.nth(bill_idx)
-        bill_label = norm(bill_cell.inner_text())
-
-        bill_a = bill_cell.locator("a").first
-        bill_href = None
-        try:
-            if bill_a.count() > 0:
-                bill_href = bill_a.get_attribute("href")
-        except Exception:
-            bill_href = None
-
-        bill_status_url = urljoin(base_url, bill_href) if bill_href else None
-
-        date_text = norm(cells.nth(date_idx).inner_text())
-
-        row_text = norm(r.inner_text())
-
-        out.append(
+        rows.append(
             {
                 "lco": lco,
-                "bill_status_url": bill_status_url,
-                "bill_label": bill_label,
+                "bill_label": bill,
+                "bill_status_url": bill_status_url_from_bill(bill),
                 "date_text": date_text,
-                "row_text": row_text,
+                "sched_letter": sched,
+                "row_text": norm(ln),
+                "cal_no": cal_no,
             }
         )
 
-    return out
+    return rows
 
 
 def find_amendment_pdf_on_status(status_url: str, lco: str):
     """
-    Fetches the bill status page and finds the best matching amendment link for this LCO.
+    Fetch bill status page; find the best matching amendment PDF link for this LCO.
     Returns absolute URL if found, else None.
     """
     if not status_url:
@@ -304,7 +210,6 @@ def find_amendment_pdf_on_status(status_url: str, lco: str):
     soup = BeautifulSoup(r.text, "lxml")
     links = soup.find_all("a", href=True)
 
-    # Prefer direct PDF links mentioning the LCO
     candidates = []
     for a in links:
         href = a["href"]
@@ -344,28 +249,28 @@ def process_chamber(chamber_name: str, report_url: str, state_key: str, playwrig
     try:
         goto_with_retry(page, report_url)
 
-        # Optional; correctness does not depend on these clicks
+        # Optional UI sort click (not required)
         try:
             click_sort_date_desc(page)
         except Exception:
             pass
 
-        rows = extract_rows_from_report(page, base_url=report_url)
+        rows = extract_rows_from_report_text(page, base_url=report_url)
 
-        # Sort newest-first by Date Rec. (and then by LCO as tie-breaker)
+        # Sort newest-first by Date Rec. then by LCO as tie-breaker
         rows.sort(key=lambda r: (parse_mmddyyyy(r.get("date_text", "")), int(r["lco"])), reverse=True)
 
         if DEBUG:
             print(f"[{chamber_name}] extracted rows: {len(rows)}")
             for r in rows[:10]:
                 print(
-                    f"  date={r.get('date_text')}  LCO={r['lco']}  bill={r['bill_label']}  status={r['bill_status_url']}"
+                    f"  date={r.get('date_text')}  LCO={r['lco']}  bill={r['bill_label']}  status={r['bill_status_url']}  sched={r.get('sched_letter')}"
                 )
 
         if not rows:
             return
 
-        # Determine "new" rows until we hit last_seen (newest-first)
+        # Determine new rows until we hit last_seen (newest-first)
         new_rows = []
         for row in rows:
             if last_seen and row["lco"] == last_seen:
@@ -375,7 +280,7 @@ def process_chamber(chamber_name: str, report_url: str, state_key: str, playwrig
         if not new_rows:
             return
 
-        # Update last seen to the newest LCO (top after sort)
+        # Update last seen to newest LCO (top after sort)
         newest_lco = rows[0]["lco"]
         state[state_key] = newest_lco
         save_state(state)
@@ -396,15 +301,14 @@ def process_chamber(chamber_name: str, report_url: str, state_key: str, playwrig
                 f"LCO {row['lco']}",
                 f"Bill: {row['bill_label']}",
             ]
+            if row.get("sched_letter"):
+                msg_lines.append(f"Sched. Ltr.: {row['sched_letter']}")
 
             if pdf:
                 msg_lines.append(f"Amendment PDF: {pdf}")
-            elif status_url:
-                msg_lines.append(f"Status page: {status_url}")
-                msg_lines.append("(Could not locate PDF link for this LCO—status page should contain it.)")
             else:
-                msg_lines.append("Could not locate bill/status link on report row.")
-                msg_lines.append(f"Row: {row['row_text']}")
+                msg_lines.append(f"Bill status: {status_url}")
+                msg_lines.append("(If the PDF link wasn’t detected, open the status page—amendments are listed there.)")
 
             msg = "\n".join(msg_lines)
 
