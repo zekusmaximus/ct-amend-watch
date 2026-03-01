@@ -6,22 +6,19 @@ Planned enhancements for CT Amend Watch. All features have been implemented.
 
 ## Feature 1: Direct Amendment Links -- IMPLEMENTED
 
-**Goal:** Link directly to the specific amendment PDF on the CGA site by its LCO number, rather than guessing or falling back to the bill status page.
+**Goal:** Link directly to the specific amendment PDF on the CGA site by its LCO number, without scraping the bill status page.
 
 ### What Was Done
 
-Investigation of the CGA bill status page revealed that amendment links are in static HTML (no JS rendering needed) across two sections:
+The CGA `robots.txt` disallows `/asp/cgabillstatus/`, so we avoid scraping that page entirely. Instead, amendment PDFs are located by constructing the URL directly from the LCO number:
 
-- **Called Amendments:** link text like `House Schedule D LCO# 2413 (R)`, href like `/2026/amd/S/pdf/2026SB-00298-R00HD-AMD.pdf`
-- **Uncalled Amendments:** link text like `House LCO Amendment #2413 (R)`, href like `/2026/lcoamd/pdf/2026LCO02413-R00-AMD.pdf`
+```text
+https://www.cga.ct.gov/{SESSION_YEAR}/lcoamd/pdf/{SESSION_YEAR}LCO{lco}-R00-AMD.pdf
+```
 
-`find_amendment_pdf_on_status()` was rewritten to:
+`build_direct_pdf_url()` constructs the URL and `find_amendment_pdf()` verifies it's reachable with a HEAD request before including it in the notification. This avoids any requests to disallowed paths.
 
-- Only consider links with `/amd/` or `/lcoamd/` in the href, filtering out fiscal notes, votes, and other unrelated links
-- Extract the LCO number from each link's text using the regex `LCO[#\s]*(\d+)` and compare as integers to handle leading-zero mismatches
-- Return the first exact match with no greedy fallback
-
-The notification message now always includes the bill status URL as a secondary reference, and shows the direct amendment link when found.
+The notification message still includes the bill status URL as a human-clickable reference (the bot itself never fetches it).
 
 ---
 
@@ -244,103 +241,11 @@ Key design decisions:
 - The filter runs inside the notification loop *after* state has advanced, so filtered amendments are still marked as seen and won't re-trigger on the next run
 - Config path is overridable via `CT_AMEND_CONFIG_PATH` env var
 
-#### Layer B: Committee / Subject Filter -- IMPLEMENTED
+#### Layer B: Committee / Subject Filter -- REMOVED
 
-**Concept:** The bill status page contains committee assignments and subject categorization. Scrape those fields and match against a list of topics.
+This feature was implemented but later removed to comply with the CGA `robots.txt`, which disallows `/asp/cgabillstatus/`. The committee/subject filter required scraping the bill status page to extract committee assignments and bill titles, which is no longer done.
 
-**Investigation needed:** Check the bill status page HTML to find where committee and subject info appears. It likely looks something like:
-
-```html
-<b>Referred To:</b> Joint Committee on Education
-<b>Subjects:</b> Education, Children, Taxation
-```
-
-**Configuration addition:**
-
-```json
-// config.json additions
-{
-  "watched_subjects": ["education", "housing", "taxation"],
-  "watched_committees": ["education", "appropriations"]
-}
-```
-
-**Implementation:**
-
-```python
-def fetch_bill_metadata(status_url: str) -> dict:
-    """Scrape committee and subject info from the bill status page."""
-    r = requests.get(status_url, timeout=25, headers={"User-Agent": USER_AGENT})
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "lxml")
-    text = soup.get_text(" ", strip=True).lower()
-
-    # These selectors will need to be refined based on actual page structure
-    metadata = {"committees": [], "subjects": []}
-
-    # Look for patterns like "Referred To: Joint Committee on Education"
-    ref_match = re.search(r"referred to[:\s]+(.+?)(?:\n|$)", text)
-    if ref_match:
-        metadata["committees"] = [c.strip() for c in ref_match.group(1).split(",")]
-
-    subj_match = re.search(r"subjects?[:\s]+(.+?)(?:\n|$)", text)
-    if subj_match:
-        metadata["subjects"] = [s.strip() for s in subj_match.group(1).split(",")]
-
-    return metadata
-
-def matches_subject_filter(metadata: dict, config: dict) -> bool:
-    watched_subjects = {s.lower() for s in config.get("watched_subjects", [])}
-    watched_committees = {c.lower() for c in config.get("watched_committees", [])}
-
-    if not watched_subjects and not watched_committees:
-        return True  # No subject filter configured
-
-    for subj in metadata.get("subjects", []):
-        if any(ws in subj.lower() for ws in watched_subjects):
-            return True
-
-    for comm in metadata.get("committees", []):
-        if any(wc in comm.lower() for wc in watched_committees):
-            return True
-
-    return False
-```
-
-Update `should_notify()` to also check subject/committee:
-
-```python
-def should_notify(bill_label: str, status_url: str, config: dict) -> bool:
-    # First check bill-level filter
-    if not passes_bill_filter(bill_label, config):
-        return False
-
-    # Then check subject/committee filter (requires a network request)
-    watched_subjects = config.get("watched_subjects", [])
-    watched_committees = config.get("watched_committees", [])
-
-    if not watched_subjects and not watched_committees:
-        return True
-
-    try:
-        metadata = fetch_bill_metadata(status_url)
-        return matches_subject_filter(metadata, config)
-    except Exception:
-        return True  # On error, don't suppress — better to over-notify
-```
-
-**Caching consideration:** Multiple amendments can be for the same bill. Cache `fetch_bill_metadata()` results by bill number to avoid redundant requests:
-
-```python
-_bill_metadata_cache = {}
-
-def fetch_bill_metadata_cached(status_url: str, bill_label: str) -> dict:
-    if bill_label in _bill_metadata_cache:
-        return _bill_metadata_cache[bill_label]
-    metadata = fetch_bill_metadata(status_url)
-    _bill_metadata_cache[bill_label] = metadata
-    return metadata
-```
+The LLM relevance scoring (Layer C) provides a stronger alternative — it scores amendment content directly from the PDF text against user-defined interests, without needing to access the bill status page.
 
 #### Layer C: LLM Relevance Scoring -- IMPLEMENTED
 
@@ -487,15 +392,13 @@ Post should cover:
 
 ## Implementation Order
 
-```
+```text
 Feature 1  (Direct Links)    ──> DONE
 Feature 3A (Bill Filter)     ──> DONE
 Feature 2  (Summarization)   ──> DONE
-Feature 3B (Subject Filter)  ──> DONE
+Feature 3B (Subject Filter)  ──> REMOVED (robots.txt compliance)
 Feature 3C (LLM Relevance)   ──> DONE
 Feature 4  (Public Launch)   ──> DONE
 ```
 
-Recommended next: **2 -> 3B -> 3C -> 4**
-
-Summarization (2) adds the most user-facing value of what remains. Subject filtering (3B) is a straightforward scrape of existing page data. LLM relevance (3C) compounds in value once summarization is live. Public launch (4) is the final step once everything is working and tested.
+All active features are implemented. Feature 3B (subject/committee filtering) was removed because it required scraping the bill status page, which is disallowed by the CGA `robots.txt`. LLM relevance scoring (3C) serves as a stronger replacement for topic-based filtering.

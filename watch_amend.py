@@ -3,10 +3,8 @@ import json
 import os
 import re
 import tempfile
-from urllib.parse import urljoin
 
 import requests
-from bs4 import BeautifulSoup
 from playwright.sync_api import TimeoutError as PWTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -149,71 +147,6 @@ def should_notify_bill(bill_label: str, config: dict) -> bool:
         return bill_upper not in {b.upper().strip() for b in config.get("ignored_bills", [])}
     return True
 
-
-_bill_metadata_cache: dict[str, dict] = {}
-
-
-def fetch_bill_metadata(status_url: str, bill_label: str) -> dict:
-    """Scrape bill title and committee referral from the bill status page.
-
-    Results are cached by bill_label so multiple amendments for the same
-    bill don't trigger redundant requests.
-    """
-    if bill_label in _bill_metadata_cache:
-        return _bill_metadata_cache[bill_label]
-
-    metadata: dict = {"title": "", "committees": []}
-
-    try:
-        r = requests.get(status_url, timeout=25, headers={"User-Agent": USER_AGENT})
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "lxml")
-        text = soup.get_text("\n", strip=True)
-
-        for line in text.split("\n"):
-            stripped = line.strip()
-            if stripped.upper().startswith("AN ACT ") and not metadata["title"]:
-                metadata["title"] = stripped
-            m = re.match(r"(?i)referred to (.+)", stripped)
-            if m:
-                metadata["committees"].append(m.group(1).strip())
-    except Exception:
-        pass
-
-    _bill_metadata_cache[bill_label] = metadata
-    return metadata
-
-
-def should_notify_topic(bill_label: str, status_url: str, config: dict) -> bool:
-    """Check if a bill matches the configured subject/committee filters.
-
-    Returns True (allow) when no topic filters are configured, or when
-    any watched subject appears in the bill title, or any watched
-    committee appears in the referral text.  On scraping errors, defaults
-    to True so we never silently suppress notifications.
-    """
-    watched_subjects = [s.lower() for s in config.get("watched_subjects", [])]
-    watched_committees = [c.lower() for c in config.get("watched_committees", [])]
-
-    if not watched_subjects and not watched_committees:
-        return True
-
-    metadata = fetch_bill_metadata(status_url, bill_label)
-
-    title_lower = metadata.get("title", "").lower()
-    if watched_subjects and title_lower:
-        for ws in watched_subjects:
-            if ws in title_lower:
-                return True
-
-    committees_lower = [c.lower() for c in metadata.get("committees", [])]
-    if watched_committees:
-        for wc in watched_committees:
-            for comm in committees_lower:
-                if wc in comm:
-                    return True
-
-    return False
 
 
 def get_telegram_creds():
@@ -365,44 +298,36 @@ def extract_rows_from_report_text(page, base_url: str):
     return rows
 
 
-_LCO_IN_TEXT_RE = re.compile(r"LCO[#\s]*(\d+)", re.I)
 
-
-def find_amendment_pdf_on_status(status_url: str, lco: str):
+def build_direct_pdf_url(lco: str) -> str:
     """
-    Fetch bill status page; find the amendment PDF link matching this LCO.
+    Construct a direct PDF URL from the LCO number alone.
 
-    The CGA bill status page has two amendment sections:
-      - Called Amendments:   link text like "House Schedule D LCO# 2413 (R)"
-                             href like /2026/amd/S/pdf/2026SB-00298-R00HD-AMD.pdf
-      - Uncalled Amendments: link text like "House LCO Amendment #2413 (R)"
-                             href like /2026/lcoamd/pdf/2026LCO02413-R00-AMD.pdf
+    Uncalled-amendment PDFs live at a predictable path:
+        /2026/lcoamd/pdf/2026LCO{lco}-R00-AMD.pdf
 
-    We match by extracting the LCO number from each link's text and comparing
-    as integers (avoids leading-zero mismatches).  We only consider links whose
-    href contains /amd/ or /lcoamd/ to avoid matching fiscal notes, votes, etc.
+    This avoids scraping the bill-status page (disallowed by robots.txt).
     """
-    if not status_url:
-        return None
+    lco_padded = lco.zfill(5)
+    return f"https://www.cga.ct.gov/{SESSION_YEAR}/lcoamd/pdf/{SESSION_YEAR}LCO{lco_padded}-R00-AMD.pdf"
 
-    lco_int = int(lco)
 
-    r = requests.get(status_url, timeout=25, headers={"User-Agent": USER_AGENT})
-    r.raise_for_status()
+def find_amendment_pdf(lco: str):
+    """
+    Try to locate the amendment PDF by constructing the URL directly.
 
-    soup = BeautifulSoup(r.text, "lxml")
+    Returns the PDF URL if reachable, else None.
+    """
+    url = build_direct_pdf_url(lco)
+    try:
+        r = requests.head(url, timeout=15, headers={"User-Agent": USER_AGENT}, allow_redirects=True)
+        if r.status_code == 200:
+            return url
+    except Exception:
+        pass
 
-    for a in soup.find_all("a", href=True):
-        href = a["href"].lower()
-        # Only look at amendment links (called or uncalled), skip fiscal notes / votes
-        if "/amd/" not in href and "/lcoamd/" not in href:
-            continue
-
-        text = a.get_text(" ", strip=True)
-        m = _LCO_IN_TEXT_RE.search(text)
-        if m and int(m.group(1)) == lco_int:
-            return urljoin(status_url, a["href"])
-
+    if DEBUG:
+        print(f"[debug] direct PDF URL not reachable for LCO {lco}: {url}")
     return None
 
 
@@ -544,16 +469,10 @@ def process_chamber(chamber_name: str, report_url: str, state_key: str, playwrig
 
             status_url = row["bill_status_url"]
 
-            if not should_notify_topic(row["bill_label"], status_url, config):
-                if DEBUG:
-                    print(f"[debug] skipping {row['bill_label']} LCO {row['lco']} (no topic match)")
-                continue
-            pdf = None
-            if status_url:
-                try:
-                    pdf = find_amendment_pdf_on_status(status_url, row["lco"])
-                except Exception:
-                    pdf = None
+            try:
+                pdf = find_amendment_pdf(row["lco"])
+            except Exception:
+                pdf = None
 
             msg_lines = [
                 f"CT {chamber_name} amendment update",

@@ -93,8 +93,6 @@ By default, you get notifications for **every** amendment in both chambers. To n
   "filter_mode": "watchlist",
   "watched_bills": ["SB00298", "HB05032"],
   "ignored_bills": [],
-  "watched_subjects": [],
-  "watched_committees": [],
   "interests": [],
   "relevance_threshold": 4
 }
@@ -107,22 +105,6 @@ By default, you get notifications for **every** amendment in both chambers. To n
   "filter_mode": "blocklist",
   "watched_bills": [],
   "ignored_bills": ["SB00001"],
-  "watched_subjects": [],
-  "watched_committees": [],
-  "interests": [],
-  "relevance_threshold": 4
-}
-```
-
-**Filter by topic or committee** (matches against the bill title and committee referral on the CGA site):
-
-```json
-{
-  "filter_mode": "all",
-  "watched_bills": [],
-  "ignored_bills": [],
-  "watched_subjects": ["education", "housing", "taxation"],
-  "watched_committees": ["appropriations", "education"],
   "interests": [],
   "relevance_threshold": 4
 }
@@ -162,8 +144,6 @@ Edit `config.json` to add your interests:
   "filter_mode": "all",
   "watched_bills": [],
   "ignored_bills": [],
-  "watched_subjects": [],
-  "watched_committees": [],
   "interests": [
     "K-12 education funding and teacher pay",
     "affordable housing and zoning reform",
@@ -184,7 +164,7 @@ Workflows are disabled on forks by default. Go to the **Actions** tab and enable
 The first run never sends messages — it just records the current state. You'll get messages on subsequent runs when new amendments are actually filed. If amendments have been filed and you're still not getting messages, double-check your `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` secrets.
 
 **"I'm getting too many notifications"**
-Edit `config.json` to use a watchlist of specific bills, or add topic/committee filters. See [Choose Which Bills to Follow](#choose-which-bills-to-follow).
+Edit `config.json` to use a watchlist of specific bills, or enable AI relevance scoring to filter by your interests. See [Choose Which Bills to Follow](#choose-which-bills-to-follow).
 
 **"The workflow is failing"**
 Click on the failed run in the **Actions** tab to see the error log. The most common issues are incorrect secrets or the CGA website being temporarily down (it will retry on the next run).
@@ -204,8 +184,8 @@ If you prefer to self-host instead of using GitHub Actions, see [VPS_CRON.md](VP
 1. Scrapes the CGA House and Senate amendment report pages using a headless browser
 2. Parses the tabular text output to extract amendment metadata (LCO #, Bill #, Date Received, Schedule Letter)
 3. Compares against `state.json` to identify new amendments since the last run
-4. Applies bill/topic/committee filters from `config.json`
-5. Resolves the direct amendment PDF link by fetching the bill status page and matching the LCO number
+4. Applies bill watchlist/blocklist filters from `config.json`
+5. Constructs the direct amendment PDF link from the LCO number (no bill status page scraping, respecting `robots.txt`)
 6. (If enabled) Downloads the PDF, extracts text, and sends it to Claude Haiku for summarization
 7. (If enabled) Scores the summary against configured interests for relevance filtering
 8. Sends a Telegram message for each qualifying amendment
@@ -233,8 +213,7 @@ If you prefer to self-host instead of using GitHub Actions, see [VPS_CRON.md](VP
 | Package | Purpose |
 |---------|---------|
 | `playwright` | Headless browser for scraping CGA report pages |
-| `requests` | HTTP client for Telegram API and bill status page fetches |
-| `beautifulsoup4` + `lxml` | HTML parsing for amendment PDF link discovery |
+| `requests` | HTTP client for Telegram API and PDF downloads |
 | `pdfplumber` | PDF text extraction for AI summaries |
 | `anthropic` | Claude API client for summaries and relevance scoring |
 
