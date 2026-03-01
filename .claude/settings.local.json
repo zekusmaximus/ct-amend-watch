@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:www.cga.ct.gov)",
-      "Bash(curl -sk \"https://www.cga.ct.gov/asp/CGABillStatus/cgabillstatus.asp?selBillType=Bill&bill_num=SB00298&which_year=2026\")"
+      "Bash(curl -sk \"https://www.cga.ct.gov/asp/CGABillStatus/cgabillstatus.asp?selBillType=Bill&bill_num=SB00298&which_year=2026\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''watch_amend.py'', doraise=True\\); print\\(''OK''\\)\")"
     ]
   }
 }

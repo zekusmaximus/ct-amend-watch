@@ -50,6 +50,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CT_REQUIRE_TELEGRAM: "1"
+          CT_ENABLE_SUMMARY: "1"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python watch_amend.py
 
       - name: Persist state.json to repo

@@ -1,6 +1,6 @@
 # Feature Ideas
 
-Planned enhancements for CT Amend Watch. Features 1 and 3A have been implemented.
+Planned enhancements for CT Amend Watch. All features have been implemented.
 
 ---
 
@@ -25,7 +25,7 @@ The notification message now always includes the bill status URL as a secondary 
 
 ---
 
-## Feature 2: LLM Summarization
+## Feature 2: LLM Summarization -- IMPLEMENTED
 
 **Goal:** When a new amendment is detected, fetch the amendment text and generate a 2-3 sentence plain-language summary to include in the Telegram notification.
 
@@ -244,7 +244,7 @@ Key design decisions:
 - The filter runs inside the notification loop *after* state has advanced, so filtered amendments are still marked as seen and won't re-trigger on the next run
 - Config path is overridable via `CT_AMEND_CONFIG_PATH` env var
 
-#### Layer B: Committee / Subject Filter (medium complexity)
+#### Layer B: Committee / Subject Filter -- IMPLEMENTED
 
 **Concept:** The bill status page contains committee assignments and subject categorization. Scrape those fields and match against a list of topics.
 
@@ -342,7 +342,7 @@ def fetch_bill_metadata_cached(status_url: str, bill_label: str) -> dict:
     return metadata
 ```
 
-#### Layer C: LLM Relevance Scoring (requires Feature 2)
+#### Layer C: LLM Relevance Scoring -- IMPLEMENTED
 
 **Concept:** If summarization is enabled (Feature 2), add a second LLM pass that scores relevance against your configured interests.
 
@@ -435,7 +435,7 @@ No new dependencies for Layers A and B. Layer C reuses the `anthropic` SDK from 
 
 ---
 
-## Feature 4: Public Launch Package
+## Feature 4: Public Launch Package -- IMPLEMENTED
 
 **Goal:** Once all features are coded and tested, share the tool publicly so fellow CT lobbyists can set it up themselves. The audience is semi-technical — comfortable following step-by-step instructions but unlikely to know git CLI or Python.
 
@@ -490,10 +490,10 @@ Post should cover:
 ```
 Feature 1  (Direct Links)    ──> DONE
 Feature 3A (Bill Filter)     ──> DONE
-Feature 2  (Summarization)   ──> requires ANTHROPIC_API_KEY
-Feature 3B (Subject Filter)  ──> can be done standalone
-Feature 3C (LLM Relevance)   ──> requires Feature 2
-Feature 4  (Public Launch)   ──> after all features tested
+Feature 2  (Summarization)   ──> DONE
+Feature 3B (Subject Filter)  ──> DONE
+Feature 3C (LLM Relevance)   ──> DONE
+Feature 4  (Public Launch)   ──> DONE
 ```
 
 Recommended next: **2 -> 3B -> 3C -> 4**

@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import tempfile
 from urllib.parse import urljoin
 
 import requests
@@ -66,6 +67,10 @@ USER_AGENT = "ct-amend-watcher/1.4 (+playwright)"
 
 DEBUG = os.environ.get("CT_AMEND_DEBUG", "0") == "1"
 REQUIRE_TELEGRAM = os.environ.get("CT_REQUIRE_TELEGRAM", "0") == "1"
+ENABLE_SUMMARY = (
+    os.environ.get("CT_ENABLE_SUMMARY", "0") == "1"
+    and bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+)
 
 
 # === Helpers ===
@@ -114,7 +119,15 @@ def save_state(state):
 
 
 def load_config():
-    defaults = {"filter_mode": "all", "watched_bills": [], "ignored_bills": []}
+    defaults = {
+        "filter_mode": "all",
+        "watched_bills": [],
+        "ignored_bills": [],
+        "watched_subjects": [],
+        "watched_committees": [],
+        "interests": [],
+        "relevance_threshold": 4,
+    }
     if not os.path.exists(CONFIG_PATH):
         return defaults
     try:
@@ -135,6 +148,72 @@ def should_notify_bill(bill_label: str, config: dict) -> bool:
     elif mode == "blocklist":
         return bill_upper not in {b.upper().strip() for b in config.get("ignored_bills", [])}
     return True
+
+
+_bill_metadata_cache: dict[str, dict] = {}
+
+
+def fetch_bill_metadata(status_url: str, bill_label: str) -> dict:
+    """Scrape bill title and committee referral from the bill status page.
+
+    Results are cached by bill_label so multiple amendments for the same
+    bill don't trigger redundant requests.
+    """
+    if bill_label in _bill_metadata_cache:
+        return _bill_metadata_cache[bill_label]
+
+    metadata: dict = {"title": "", "committees": []}
+
+    try:
+        r = requests.get(status_url, timeout=25, headers={"User-Agent": USER_AGENT})
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "lxml")
+        text = soup.get_text("\n", strip=True)
+
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.upper().startswith("AN ACT ") and not metadata["title"]:
+                metadata["title"] = stripped
+            m = re.match(r"(?i)referred to (.+)", stripped)
+            if m:
+                metadata["committees"].append(m.group(1).strip())
+    except Exception:
+        pass
+
+    _bill_metadata_cache[bill_label] = metadata
+    return metadata
+
+
+def should_notify_topic(bill_label: str, status_url: str, config: dict) -> bool:
+    """Check if a bill matches the configured subject/committee filters.
+
+    Returns True (allow) when no topic filters are configured, or when
+    any watched subject appears in the bill title, or any watched
+    committee appears in the referral text.  On scraping errors, defaults
+    to True so we never silently suppress notifications.
+    """
+    watched_subjects = [s.lower() for s in config.get("watched_subjects", [])]
+    watched_committees = [c.lower() for c in config.get("watched_committees", [])]
+
+    if not watched_subjects and not watched_committees:
+        return True
+
+    metadata = fetch_bill_metadata(status_url, bill_label)
+
+    title_lower = metadata.get("title", "").lower()
+    if watched_subjects and title_lower:
+        for ws in watched_subjects:
+            if ws in title_lower:
+                return True
+
+    committees_lower = [c.lower() for c in metadata.get("committees", [])]
+    if watched_committees:
+        for wc in watched_committees:
+            for comm in committees_lower:
+                if wc in comm:
+                    return True
+
+    return False
 
 
 def get_telegram_creds():
@@ -327,6 +406,87 @@ def find_amendment_pdf_on_status(status_url: str, lco: str):
     return None
 
 
+def extract_text_from_pdf_url(pdf_url: str, max_pages: int = 20) -> str | None:
+    """Download an amendment PDF and extract its text content."""
+    import pdfplumber
+
+    resp = requests.get(pdf_url, timeout=30, headers={"User-Agent": USER_AGENT})
+    resp.raise_for_status()
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(resp.content)
+        tmp_path = tmp.name
+
+    try:
+        text_parts = []
+        with pdfplumber.open(tmp_path) as pdf:
+            for i, pg in enumerate(pdf.pages):
+                if i >= max_pages:
+                    break
+                page_text = pg.extract_text()
+                if page_text:
+                    text_parts.append(page_text)
+        return "\n".join(text_parts) if text_parts else None
+    finally:
+        os.unlink(tmp_path)
+
+
+def summarize_amendment(amendment_text: str, bill_label: str) -> str | None:
+    """Use Claude Haiku to generate a plain-language summary of the amendment."""
+    import anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    prompt = (
+        f"You are summarizing a Connecticut legislative amendment for bill {bill_label}. "
+        f"Provide a 2-3 sentence plain-language summary. Focus on: what the amendment "
+        f"changes, who it affects, and any fiscal impact. Be concise and factual.\n\n"
+        f"Amendment text:\n{amendment_text[:12000]}"
+    )
+
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return message.content[0].text.strip()
+
+
+def score_relevance(summary: str, interests: list[str]) -> int | None:
+    """Ask Claude Haiku to score 1-10 how relevant an amendment is to user interests."""
+    import anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key or not interests:
+        return None
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    interest_list = "\n".join(f"- {i}" for i in interests)
+    prompt = (
+        f"Given these topics of interest:\n{interest_list}\n\n"
+        f"And this amendment summary:\n{summary}\n\n"
+        f"Rate 1-10 how relevant this amendment is to the listed interests. "
+        f"Respond with ONLY a single integer."
+    )
+
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=10,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    try:
+        return int(message.content[0].text.strip())
+    except ValueError:
+        return None
+
+
 def process_chamber(chamber_name: str, report_url: str, state_key: str, playwright, telegram_ready: bool):
     state = load_state()
     last_seen = state.get(state_key)
@@ -383,6 +543,11 @@ def process_chamber(chamber_name: str, report_url: str, state_key: str, playwrig
                 continue
 
             status_url = row["bill_status_url"]
+
+            if not should_notify_topic(row["bill_label"], status_url, config):
+                if DEBUG:
+                    print(f"[debug] skipping {row['bill_label']} LCO {row['lco']} (no topic match)")
+                continue
             pdf = None
             if status_url:
                 try:
@@ -401,6 +566,38 @@ def process_chamber(chamber_name: str, report_url: str, state_key: str, playwrig
 
             if pdf:
                 msg_lines.append(f"Amendment: {pdf}")
+
+            summary = None
+            if pdf and ENABLE_SUMMARY:
+                try:
+                    amendment_text = extract_text_from_pdf_url(pdf)
+                    if amendment_text:
+                        summary = summarize_amendment(amendment_text, row["bill_label"])
+                        if DEBUG:
+                            print(f"[debug] summary for LCO {row['lco']}: {summary[:80]}...")
+                except Exception as e:
+                    if DEBUG:
+                        print(f"[debug] summarization failed for LCO {row['lco']}: {e}")
+
+            # --- Feature 3C: LLM Relevance Scoring ---
+            relevance_score = None
+            if summary and config.get("interests"):
+                try:
+                    threshold = config.get("relevance_threshold", 4)
+                    relevance_score = score_relevance(summary, config["interests"])
+                    if relevance_score is not None and relevance_score < threshold:
+                        if DEBUG:
+                            print(f"[debug] skipping LCO {row['lco']} — relevance score {relevance_score} < {threshold}")
+                        continue
+                except Exception as e:
+                    if DEBUG:
+                        print(f"[debug] relevance scoring failed for LCO {row['lco']}: {e}")
+
+            if summary:
+                msg_lines.append(f"\nSummary: {summary}")
+            if relevance_score is not None:
+                msg_lines.append(f"Relevance: {relevance_score}/10")
+
             msg_lines.append(f"Bill status: {status_url}")
 
             msg = "\n".join(msg_lines)

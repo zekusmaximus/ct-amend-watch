@@ -1,26 +1,12 @@
 # CT Amend Watch
 
-Monitors Connecticut General Assembly (CGA) amendment reports for both House and Senate chambers and sends real-time notifications via Telegram when new amendments are filed.
+Get instant Telegram notifications when new amendments are filed at the Connecticut General Assembly. No more manually refreshing the CGA website during session — this tool checks every 5 minutes and sends you a message with a direct link to the amendment PDF, the bill it applies to, and (optionally) an AI-generated plain-language summary.
 
-Designed to run unattended every 5 minutes via GitHub Actions or a VPS cron job.
+**Free, open source, and takes about 10 minutes to set up. No coding required.**
 
-## How It Works
+## What You'll Get
 
-1. **Scrapes** the CGA House and Senate amendment report pages using Playwright (headless Chromium)
-2. **Parses** the tabular text output to extract amendment metadata: Calendar #, LCO #, Bill #, Date Received, and Schedule Letter
-3. **Compares** against a persisted `state.json` to identify new amendments since the last run
-4. **Filters** amendments against an optional bill watchlist/blocklist (`config.json`)
-5. **Resolves** the direct amendment PDF link by fetching the bill status page and matching the LCO number against Called/Uncalled amendment sections
-6. **Sends** a Telegram message for each new amendment with the direct amendment link, bill status URL, and all relevant metadata
-
-## Data Sources
-
-| Chamber | Report URL |
-|---------|-----------|
-| House | [CGAHouseAmendRptDisp.asp](https://www.cga.ct.gov/asp/CGAAmendProc/CGAHouseAmendRptDisp.asp?optSortby=D&optSortOrder=Desc) |
-| Senate | [CGASenateAmendRptDisp.asp](https://www.cga.ct.gov/asp/CGAAmendProc/CGASenateAmendRptDisp.asp?optSortby=D&optSortOrder=Desc) |
-
-## Telegram Notification Example
+A Telegram message like this every time a new amendment drops:
 
 ```
 CT House amendment update
@@ -29,161 +15,252 @@ LCO 2413
 Bill: SB00298
 Sched. Ltr.: A
 Amendment: https://www.cga.ct.gov/2026/amd/S/pdf/2026SB-00298-R00HD-AMD.pdf
+
+Summary: This amendment reallocates $12M in state funds to K-12
+education and modifies reporting requirements for school districts.
+No direct fiscal impact beyond the reallocation.
+Relevance: 8/10
 Bill status: https://www.cga.ct.gov/asp/CGABillStatus/cgabillstatus.asp?...
 ```
 
-## Quick Start (Local)
+The summary and relevance score are optional add-on features — the basic setup just sends the amendment link and bill info.
 
-### Prerequisites
+## Setup Guide
 
-- Python 3.11+
-- A Telegram bot token and chat ID ([how to create a bot](https://core.telegram.org/bots#how-do-i-create-a-bot))
+### Step 1: Create a Telegram Bot
 
-### Setup
+1. Open Telegram and search for **@BotFather**
+2. Send `/newbot`
+3. Choose a display name (e.g., "CT Amendment Alerts")
+4. Choose a username ending in `bot` (e.g., `ct_amend_alerts_bot`)
+5. BotFather will reply with your **bot token** — it looks like `1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`. Save this.
 
-```bash
-git clone <your-repo-url> ct-amend-watch
-cd ct-amend-watch
+### Step 2: Get Your Chat ID
 
-python -m venv .venv
-source .venv/bin/activate   # Linux/macOS
-# .venv\Scripts\activate    # Windows
+1. Search for **@userinfobot** on Telegram and start a chat
+2. It will reply with your **chat ID** — a number like `8366368439`. Save this.
 
-pip install -r requirements.txt
-python -m playwright install --with-deps chromium
-```
+> **Tip:** If you want notifications sent to a group or channel instead of a personal chat, add your bot to that group/channel first, then use the group's chat ID (which starts with `-`).
 
-### Configure
+### Step 3: Fork This Repo
 
-```bash
-cp .env.example .env
-```
+1. Click the **Fork** button at the top-right of this page
+2. Keep all defaults and click **Create fork**
+3. You now have your own copy of the project
 
-Edit `.env` with your credentials:
+### Step 4: Add Your Secrets
 
-```dotenv
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-TELEGRAM_CHAT_ID=your_chat_id_here
-CT_SESSION_YEAR=2026
-CT_REQUIRE_TELEGRAM=1
-CT_AMEND_DEBUG=0
-```
+In **your forked repo** on GitHub:
 
-### Run
+1. Go to **Settings** (tab at the top of your repo)
+2. In the left sidebar, click **Secrets and variables** > **Actions**
+3. Click **New repository secret** and add each of these:
 
-```bash
-python watch_amend.py
-```
+| Name | Value |
+|------|-------|
+| `TELEGRAM_BOT_TOKEN` | The bot token from Step 1 |
+| `TELEGRAM_CHAT_ID` | The chat ID from Step 2 |
 
-On the first run with no prior `state.json`, it records the current newest LCO for each chamber without sending notifications. Subsequent runs detect and notify on anything newer.
+That's it for the basic setup. The AI summary features are optional — see [Enable AI Summaries](#optional-enable-ai-summaries) below.
 
-## Bill Filtering
+### Step 5: Enable the Workflow
 
-By default, all amendments trigger notifications. To filter by bill number, edit `config.json`:
+GitHub disables workflows on forked repos by default. To turn it on:
+
+1. Go to the **Actions** tab in your forked repo
+2. You'll see a banner saying "Workflows aren't being run on this forked repository." Click **I understand my workflows, go ahead and enable them**
+3. In the left sidebar, click **CT Amend Watch**
+4. Click **Enable workflow**
+
+### Step 6: Verify It's Working
+
+1. On the **Actions** tab, click **CT Amend Watch** in the left sidebar
+2. Click the **Run workflow** dropdown (top right) and click **Run workflow**
+3. Wait a minute or two for it to finish (you'll see a green checkmark)
+4. The first run records the current state without sending notifications — this is normal
+5. After the first run, you'll get a Telegram message the next time a new amendment is filed
+
+The workflow runs automatically every 5 minutes. You don't need to do anything else.
+
+## Choose Which Bills to Follow
+
+By default, you get notifications for **every** amendment in both chambers. To narrow it down, edit `config.json` in your forked repo (you can do this right on GitHub — click the file, then click the pencil icon to edit).
+
+**Watch specific bills only:**
 
 ```json
 {
   "filter_mode": "watchlist",
-  "watched_bills": ["SB00298", "HB05032", "HB06450"],
-  "ignored_bills": []
+  "watched_bills": ["SB00298", "HB05032"],
+  "ignored_bills": [],
+  "watched_subjects": [],
+  "watched_committees": [],
+  "interests": [],
+  "relevance_threshold": 4
 }
 ```
 
-**Filter modes:**
+**Get everything except certain bills:**
 
-| Mode           | Behavior                                                     |
-| -------------- | ------------------------------------------------------------ |
-| `"all"`        | Notify on every amendment (default)                          |
-| `"watchlist"`  | Only notify on amendments to bills listed in `watched_bills` |
-| `"blocklist"`  | Notify on everything except bills listed in `ignored_bills`  |
+```json
+{
+  "filter_mode": "blocklist",
+  "watched_bills": [],
+  "ignored_bills": ["SB00001"],
+  "watched_subjects": [],
+  "watched_committees": [],
+  "interests": [],
+  "relevance_threshold": 4
+}
+```
 
-Filtering only affects notifications. State tracking always advances past all amendments regardless of filter, so filtered amendments won't re-trigger on the next run.
+**Filter by topic or committee** (matches against the bill title and committee referral on the CGA site):
 
-The config file path can be overridden with the `CT_AMEND_CONFIG_PATH` environment variable.
+```json
+{
+  "filter_mode": "all",
+  "watched_bills": [],
+  "ignored_bills": [],
+  "watched_subjects": ["education", "housing", "taxation"],
+  "watched_committees": ["appropriations", "education"],
+  "interests": [],
+  "relevance_threshold": 4
+}
+```
 
-## Deployment
+Bill numbers look like `SB00298` or `HB05032` — you can find them on the [CGA bill search page](https://www.cga.ct.gov/asp/CGABillStatus/cgabillstatus.asp). Filtering only affects notifications; the tool always tracks all amendments internally so you won't get duplicate alerts if you change your filters later.
 
-### Option A: GitHub Actions (Recommended)
+## (Optional) Enable AI Summaries
 
-The included workflow at `.github/workflows/watch-amend.yml` runs every 5 minutes automatically.
+You can have each amendment automatically summarized in plain language. This uses the Anthropic (Claude) API and costs fractions of a cent per summary — typical daily cost is well under $0.10 even during busy filing periods.
 
-**Setup:**
+### Get an API Key
 
-1. Push the repo to GitHub
-2. Add repository secrets:
-   - `TELEGRAM_BOT_TOKEN`
-   - `TELEGRAM_CHAT_ID`
-3. The workflow handles everything else: Python setup, Playwright install, running the watcher, and committing `state.json` back to the repo
+1. Go to [console.anthropic.com](https://console.anthropic.com) and create an account
+2. Go to **API Keys** and click **Create Key**
+3. Copy the key (it starts with `sk-ant-`)
 
-**Key workflow features:**
-- Concurrency group prevents overlapping runs
-- 10-minute timeout safety net
-- Playwright browser caching for faster cold starts
-- State auto-committed with `[skip ci]` to avoid triggering recursive runs
+### Add It to Your Repo
 
-### Option B: VPS Cron
+1. Go to **Settings** > **Secrets and variables** > **Actions** in your forked repo
+2. Add a new secret:
 
-See [VPS_CRON.md](VPS_CRON.md) for step-by-step instructions on running this via cron on a Linux VPS.
+| Name | Value |
+|------|-------|
+| `ANTHROPIC_API_KEY` | Your API key from above |
 
-Uses `flock` for mutual exclusion so overlapping runs are safely skipped.
+That's all — the workflow is already configured to use summaries when the key is present. No code changes needed.
 
-## Environment Variables
+### (Optional) AI Relevance Scoring
+
+If summaries are enabled, you can also have the AI score each amendment's relevance to your specific interests on a 1-10 scale. Amendments below your threshold won't be sent.
+
+Edit `config.json` to add your interests:
+
+```json
+{
+  "filter_mode": "all",
+  "watched_bills": [],
+  "ignored_bills": [],
+  "watched_subjects": [],
+  "watched_committees": [],
+  "interests": [
+    "K-12 education funding and teacher pay",
+    "affordable housing and zoning reform",
+    "state budget and appropriations"
+  ],
+  "relevance_threshold": 4
+}
+```
+
+Amendments scoring below `relevance_threshold` (1-10 scale) are silently skipped. Set to `1` to see everything with a score.
+
+## Troubleshooting
+
+**"I forked the repo but nothing is happening"**
+Workflows are disabled on forks by default. Go to the **Actions** tab and enable them (see Step 5 above).
+
+**"The workflow ran but I didn't get a Telegram message"**
+The first run never sends messages — it just records the current state. You'll get messages on subsequent runs when new amendments are actually filed. If amendments have been filed and you're still not getting messages, double-check your `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` secrets.
+
+**"I'm getting too many notifications"**
+Edit `config.json` to use a watchlist of specific bills, or add topic/committee filters. See [Choose Which Bills to Follow](#choose-which-bills-to-follow).
+
+**"The workflow is failing"**
+Click on the failed run in the **Actions** tab to see the error log. The most common issues are incorrect secrets or the CGA website being temporarily down (it will retry on the next run).
+
+**"I want to change my filters but I'm worried about missing amendments"**
+Filters only affect which notifications are sent — the tool always tracks all amendments internally. Changing your filters won't cause old amendments to re-trigger.
+
+## Advanced: VPS Deployment
+
+If you prefer to self-host instead of using GitHub Actions, see [VPS_CRON.md](VPS_CRON.md) for instructions on running this via cron on a Linux server.
+
+<details>
+<summary><strong>Technical Reference</strong></summary>
+
+### How It Works
+
+1. Scrapes the CGA House and Senate amendment report pages using a headless browser
+2. Parses the tabular text output to extract amendment metadata (LCO #, Bill #, Date Received, Schedule Letter)
+3. Compares against `state.json` to identify new amendments since the last run
+4. Applies bill/topic/committee filters from `config.json`
+5. Resolves the direct amendment PDF link by fetching the bill status page and matching the LCO number
+6. (If enabled) Downloads the PDF, extracts text, and sends it to Claude Haiku for summarization
+7. (If enabled) Scores the summary against configured interests for relevance filtering
+8. Sends a Telegram message for each qualifying amendment
+
+### Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes* | — | Telegram Bot API token |
-| `TELEGRAM_CHAT_ID` | Yes* | — | Telegram chat/channel ID to send messages to |
+| `TELEGRAM_CHAT_ID` | Yes* | — | Telegram chat/channel ID |
 | `CT_SESSION_YEAR` | No | `2026` | CGA legislative session year |
-| `CT_AMEND_DEBUG` | No | `0` | Set to `1` for verbose debug output |
-| `CT_REQUIRE_TELEGRAM` | No | `0` | Set to `1` to fail if Telegram creds are missing |
-| `CT_AMEND_STATE_PATH` | No | `./state.json` | Custom path for the state file |
-| `CT_AMEND_CONFIG_PATH` | No | `./config.json` | Custom path for the filter config file |
-| `CT_HOUSE_LAST_LCO` | No | — | Override starting LCO for House (used if no state.json) |
-| `CT_SENATE_LAST_LCO` | No | — | Override starting LCO for Senate (used if no state.json) |
+| `CT_AMEND_DEBUG` | No | `0` | `1` for verbose debug output |
+| `CT_REQUIRE_TELEGRAM` | No | `0` | `1` to fail if Telegram creds missing |
+| `CT_ENABLE_SUMMARY` | No | `0` | `1` to enable AI summaries (also requires `ANTHROPIC_API_KEY`) |
+| `ANTHROPIC_API_KEY` | No | — | Claude API key for summaries and relevance scoring |
+| `CT_AMEND_STATE_PATH` | No | `./state.json` | Custom state file path |
+| `CT_AMEND_CONFIG_PATH` | No | `./config.json` | Custom config file path |
+| `CT_HOUSE_LAST_LCO` | No | — | Override starting LCO for House |
+| `CT_SENATE_LAST_LCO` | No | — | Override starting LCO for Senate |
 
 *\*Required unless `CT_REQUIRE_TELEGRAM=0`, in which case it runs in scrape-only mode.*
 
-## State Tracking
-
-State is persisted in `state.json`:
-
-```json
-{
-  "house_last_lco": "2413",
-  "senate_last_lco": "2299"
-}
-```
-
-Each run compares the newest LCO on the report page against the stored value. Any amendments with a higher sort position (newer date, then higher LCO as tiebreaker) are treated as new and trigger notifications. After processing, the newest LCO is saved back.
-
-Writes are atomic (write to `.tmp`, then `os.replace`) to prevent corruption if the process is interrupted.
-
-## Dependencies
+### Dependencies
 
 | Package | Purpose |
 |---------|---------|
 | `playwright` | Headless browser for scraping CGA report pages |
 | `requests` | HTTP client for Telegram API and bill status page fetches |
-| `beautifulsoup4` | HTML parsing for locating amendment PDF links |
-| `lxml` | Fast HTML parser backend for BeautifulSoup |
+| `beautifulsoup4` + `lxml` | HTML parsing for amendment PDF link discovery |
+| `pdfplumber` | PDF text extraction for AI summaries |
+| `anthropic` | Claude API client for summaries and relevance scoring |
 
-## Project Structure
+### State Tracking
+
+State is persisted in `state.json`. Each run compares the newest LCO on the report page against the stored value. Writes are atomic (write to `.tmp`, then rename) to prevent corruption.
+
+### Project Structure
 
 ```
 ct-amend-watch/
-├── watch_amend.py                  # Main watcher script
-├── config.json                     # Bill filtering configuration
-├── requirements.txt                # Python dependencies
-├── .env.example                    # Environment variable template
-├── state.json                      # Persisted watcher state (auto-generated)
+├── watch_amend.py              # Main watcher script
+├── config.json                 # Filtering configuration
+├── requirements.txt            # Python dependencies
+├── .env.example                # Environment variable template
+├── state.json                  # Watcher state (auto-generated)
 ├── .github/workflows/
-│   └── watch-amend.yml             # GitHub Actions workflow
+│   └── watch-amend.yml         # GitHub Actions workflow
 ├── scripts/
-│   └── run_cron.sh                 # VPS cron wrapper with flock
-├── VPS_CRON.md                     # VPS deployment guide
-└── feature_ideas.md                # Planned feature roadmap
+│   └── run_cron.sh             # VPS cron wrapper
+├── VPS_CRON.md                 # VPS deployment guide
+└── feature_ideas.md            # Feature roadmap
 ```
+
+</details>
 
 ## License
 
-Private project. Not currently licensed for redistribution.
+MIT License. See [LICENSE](LICENSE) for details.
