@@ -57,6 +57,10 @@ STATE_PATH = os.environ.get(
     "CT_AMEND_STATE_PATH",
     os.path.join(os.path.dirname(__file__), "state.json"),
 )
+CONFIG_PATH = os.environ.get(
+    "CT_AMEND_CONFIG_PATH",
+    os.path.join(os.path.dirname(__file__), "config.json"),
+)
 
 USER_AGENT = "ct-amend-watcher/1.4 (+playwright)"
 
@@ -107,6 +111,30 @@ def save_state(state):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, sort_keys=True)
     os.replace(tmp, STATE_PATH)
+
+
+def load_config():
+    defaults = {"filter_mode": "all", "watched_bills": [], "ignored_bills": []}
+    if not os.path.exists(CONFIG_PATH):
+        return defaults
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return defaults
+        return {**defaults, **data}
+    except Exception:
+        return defaults
+
+
+def should_notify_bill(bill_label: str, config: dict) -> bool:
+    mode = config.get("filter_mode", "all")
+    bill_upper = bill_label.upper().strip()
+    if mode == "watchlist":
+        return bill_upper in {b.upper().strip() for b in config.get("watched_bills", [])}
+    elif mode == "blocklist":
+        return bill_upper not in {b.upper().strip() for b in config.get("ignored_bills", [])}
+    return True
 
 
 def get_telegram_creds():
@@ -258,44 +286,43 @@ def extract_rows_from_report_text(page, base_url: str):
     return rows
 
 
+_LCO_IN_TEXT_RE = re.compile(r"LCO[#\s]*(\d+)", re.I)
+
+
 def find_amendment_pdf_on_status(status_url: str, lco: str):
     """
-    Fetch bill status page; find the best matching amendment PDF link for this LCO.
-    Returns absolute URL if found, else None.
+    Fetch bill status page; find the amendment PDF link matching this LCO.
+
+    The CGA bill status page has two amendment sections:
+      - Called Amendments:   link text like "House Schedule D LCO# 2413 (R)"
+                             href like /2026/amd/S/pdf/2026SB-00298-R00HD-AMD.pdf
+      - Uncalled Amendments: link text like "House LCO Amendment #2413 (R)"
+                             href like /2026/lcoamd/pdf/2026LCO02413-R00-AMD.pdf
+
+    We match by extracting the LCO number from each link's text and comparing
+    as integers (avoids leading-zero mismatches).  We only consider links whose
+    href contains /amd/ or /lcoamd/ to avoid matching fiscal notes, votes, etc.
     """
     if not status_url:
         return None
+
+    lco_int = int(lco)
 
     r = requests.get(status_url, timeout=25, headers={"User-Agent": USER_AGENT})
     r.raise_for_status()
 
     soup = BeautifulSoup(r.text, "lxml")
-    links = soup.find_all("a", href=True)
 
-    candidates = []
-    for a in links:
-        href = a["href"]
+    for a in soup.find_all("a", href=True):
+        href = a["href"].lower()
+        # Only look at amendment links (called or uncalled), skip fiscal notes / votes
+        if "/amd/" not in href and "/lcoamd/" not in href:
+            continue
+
         text = a.get_text(" ", strip=True)
-        blob = f"{text} {href}"
-        if lco in blob:
-            abs_url = urljoin(status_url, href)
-            score = 0
-            if abs_url.lower().endswith(".pdf"):
-                score += 10
-            if "amend" in blob.lower() or "amd" in blob.lower():
-                score += 3
-            candidates.append((score, abs_url))
-
-    if candidates:
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        return candidates[0][1]
-
-    # Fallback: any amendment-looking PDF
-    for a in links:
-        abs_url = urljoin(status_url, a["href"])
-        text = a.get_text(" ", strip=True).lower()
-        if abs_url.lower().endswith(".pdf") and ("amend" in text or "amend" in abs_url.lower() or "amd" in abs_url.lower()):
-            return abs_url
+        m = _LCO_IN_TEXT_RE.search(text)
+        if m and int(m.group(1)) == lco_int:
+            return urljoin(status_url, a["href"])
 
     return None
 
@@ -348,7 +375,13 @@ def process_chamber(chamber_name: str, report_url: str, state_key: str, playwrig
         save_state(state)
 
         # Notify oldest-first for readability
+        config = load_config()
         for row in reversed(new_rows):
+            if not should_notify_bill(row["bill_label"], config):
+                if DEBUG:
+                    print(f"[debug] skipping {row['bill_label']} LCO {row['lco']} (filtered by {config['filter_mode']})")
+                continue
+
             status_url = row["bill_status_url"]
             pdf = None
             if status_url:
@@ -367,10 +400,8 @@ def process_chamber(chamber_name: str, report_url: str, state_key: str, playwrig
                 msg_lines.append(f"Sched. Ltr.: {row['sched_letter']}")
 
             if pdf:
-                msg_lines.append(f"Amendment PDF: {pdf}")
-            else:
-                msg_lines.append(f"Bill status: {status_url}")
-                msg_lines.append("(If the PDF link wasn’t detected, open the status page—amendments are listed there.)")
+                msg_lines.append(f"Amendment: {pdf}")
+            msg_lines.append(f"Bill status: {status_url}")
 
             msg = "\n".join(msg_lines)
 

@@ -9,8 +9,9 @@ Designed to run unattended every 5 minutes via GitHub Actions or a VPS cron job.
 1. **Scrapes** the CGA House and Senate amendment report pages using Playwright (headless Chromium)
 2. **Parses** the tabular text output to extract amendment metadata: Calendar #, LCO #, Bill #, Date Received, and Schedule Letter
 3. **Compares** against a persisted `state.json` to identify new amendments since the last run
-4. **Looks up** the amendment PDF link on the bill's status page (via requests + BeautifulSoup)
-5. **Sends** a Telegram message for each new amendment with all relevant details and links
+4. **Filters** amendments against an optional bill watchlist/blocklist (`config.json`)
+5. **Resolves** the direct amendment PDF link by fetching the bill status page and matching the LCO number against Called/Uncalled amendment sections
+6. **Sends** a Telegram message for each new amendment with the direct amendment link, bill status URL, and all relevant metadata
 
 ## Data Sources
 
@@ -27,7 +28,8 @@ Date Rec.: 2/25/2026
 LCO 2413
 Bill: SB00298
 Sched. Ltr.: A
-Amendment PDF: https://www.cga.ct.gov/...pdf
+Amendment: https://www.cga.ct.gov/2026/amd/S/pdf/2026SB-00298-R00HD-AMD.pdf
+Bill status: https://www.cga.ct.gov/asp/CGABillStatus/cgabillstatus.asp?...
 ```
 
 ## Quick Start (Local)
@@ -75,6 +77,30 @@ python watch_amend.py
 
 On the first run with no prior `state.json`, it records the current newest LCO for each chamber without sending notifications. Subsequent runs detect and notify on anything newer.
 
+## Bill Filtering
+
+By default, all amendments trigger notifications. To filter by bill number, edit `config.json`:
+
+```json
+{
+  "filter_mode": "watchlist",
+  "watched_bills": ["SB00298", "HB05032", "HB06450"],
+  "ignored_bills": []
+}
+```
+
+**Filter modes:**
+
+| Mode           | Behavior                                                     |
+| -------------- | ------------------------------------------------------------ |
+| `"all"`        | Notify on every amendment (default)                          |
+| `"watchlist"`  | Only notify on amendments to bills listed in `watched_bills` |
+| `"blocklist"`  | Notify on everything except bills listed in `ignored_bills`  |
+
+Filtering only affects notifications. State tracking always advances past all amendments regardless of filter, so filtered amendments won't re-trigger on the next run.
+
+The config file path can be overridden with the `CT_AMEND_CONFIG_PATH` environment variable.
+
 ## Deployment
 
 ### Option A: GitHub Actions (Recommended)
@@ -111,6 +137,7 @@ Uses `flock` for mutual exclusion so overlapping runs are safely skipped.
 | `CT_AMEND_DEBUG` | No | `0` | Set to `1` for verbose debug output |
 | `CT_REQUIRE_TELEGRAM` | No | `0` | Set to `1` to fail if Telegram creds are missing |
 | `CT_AMEND_STATE_PATH` | No | `./state.json` | Custom path for the state file |
+| `CT_AMEND_CONFIG_PATH` | No | `./config.json` | Custom path for the filter config file |
 | `CT_HOUSE_LAST_LCO` | No | — | Override starting LCO for House (used if no state.json) |
 | `CT_SENATE_LAST_LCO` | No | — | Override starting LCO for Senate (used if no state.json) |
 
@@ -145,6 +172,7 @@ Writes are atomic (write to `.tmp`, then `os.replace`) to prevent corruption if 
 ```
 ct-amend-watch/
 ├── watch_amend.py                  # Main watcher script
+├── config.json                     # Bill filtering configuration
 ├── requirements.txt                # Python dependencies
 ├── .env.example                    # Environment variable template
 ├── state.json                      # Persisted watcher state (auto-generated)

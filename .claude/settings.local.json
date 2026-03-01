@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.cga.ct.gov)",
+      "Bash(curl -sk \"https://www.cga.ct.gov/asp/CGABillStatus/cgabillstatus.asp?selBillType=Bill&bill_num=SB00298&which_year=2026\")"
+    ]
+  }
+}

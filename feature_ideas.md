@@ -1,122 +1,27 @@
 # Feature Ideas
 
-Three planned enhancements for CT Amend Watch, ordered by implementation priority.
+Planned enhancements for CT Amend Watch. Features 1 and 3A have been implemented.
 
 ---
 
-## Feature 1: Direct Amendment Links
+## Feature 1: Direct Amendment Links -- IMPLEMENTED
 
-**Goal:** Instead of linking to the bill status page (or a best-guess PDF), link directly to the specific amendment on the CGA site by its LCO number.
+**Goal:** Link directly to the specific amendment PDF on the CGA site by its LCO number, rather than guessing or falling back to the bill status page.
 
-### Current Behavior
+### What Was Done
 
-`find_amendment_pdf_on_status()` fetches the bill status page with `requests` + BeautifulSoup and tries to match a link containing the LCO number. This works sometimes but fails when:
-- The LCO number appears differently in the link text vs. what we parsed (formatting, leading zeros, etc.)
-- The amendment links are loaded via JavaScript after initial page render
-- Multiple amendments exist and the fallback grabs the wrong one
+Investigation of the CGA bill status page revealed that amendment links are in static HTML (no JS rendering needed) across two sections:
 
-When it fails, the user gets the bill status page URL with a note to find the amendment manually.
+- **Called Amendments:** link text like `House Schedule D LCO# 2413 (R)`, href like `/2026/amd/S/pdf/2026SB-00298-R00HD-AMD.pdf`
+- **Uncalled Amendments:** link text like `House LCO Amendment #2413 (R)`, href like `/2026/lcoamd/pdf/2026LCO02413-R00-AMD.pdf`
 
-### Implementation Plan
+`find_amendment_pdf_on_status()` was rewritten to:
 
-#### Step 1: Investigate the bill status page structure
+- Only consider links with `/amd/` or `/lcoamd/` in the href, filtering out fiscal notes, votes, and other unrelated links
+- Extract the LCO number from each link's text using the regex `LCO[#\s]*(\d+)` and compare as integers to handle leading-zero mismatches
+- Return the first exact match with no greedy fallback
 
-Before writing code, manually check a few bill status pages to understand the link format:
-
-```
-https://www.cga.ct.gov/asp/CGABillStatus/cgabillstatus.asp?selBillType=Bill&bill_num=SB00298&which_year=2026
-```
-
-- View page source (not DevTools rendered DOM) to see if amendment links are in the raw HTML or JS-rendered
-- Note the exact format of LCO references in link text and href attributes
-- Check if amendment links go to a PDF directly or to another intermediate page
-
-#### Step 2a: If links are in static HTML (likely)
-
-The current `requests` + BeautifulSoup approach is correct. Just improve the matching:
-
-**File:** `watch_amend.py`, function `find_amendment_pdf_on_status()`
-
-```python
-def find_amendment_pdf_on_status(status_url: str, lco: str):
-    # Normalize LCO for comparison: strip leading zeros, compare as int
-    lco_int = int(lco)
-
-    r = requests.get(status_url, timeout=25, headers={"User-Agent": USER_AGENT})
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "lxml")
-
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        text = a.get_text(" ", strip=True)
-        blob = f"{text} {href}"
-
-        # Try to find any number in the blob that matches our LCO
-        for num_match in re.finditer(r'\d+', blob):
-            if int(num_match.group()) == lco_int:
-                abs_url = urljoin(status_url, href)
-                # Return the link — whether it's a PDF or an amendment detail page
-                return abs_url
-
-    return None
-```
-
-Key changes:
-- Compare LCO as integer to handle leading-zero mismatches (e.g., "2413" vs "02413")
-- Drop the scoring system — a direct LCO match is sufficient
-- Remove the greedy fallback that could grab the wrong amendment
-- Return whatever the link points to (PDF or detail page), since either is more useful than the generic bill status URL
-
-#### Step 2b: If links are JS-rendered (unlikely but possible)
-
-Use the existing Playwright browser instead of `requests`:
-
-```python
-def find_amendment_link_with_playwright(page, status_url: str, lco: str):
-    page.goto(status_url, wait_until="networkidle", timeout=30000)
-    lco_int = int(lco)
-
-    links = page.query_selector_all("a[href]")
-    for link in links:
-        text = link.inner_text()
-        href = link.get_attribute("href")
-        blob = f"{text} {href}"
-
-        for num_match in re.finditer(r'\d+', blob):
-            if int(num_match.group()) == lco_int:
-                return urljoin(status_url, href)
-
-    return None
-```
-
-This would require refactoring `process_chamber()` to pass the `page` object (or create a new page in the same context) to avoid launching another browser.
-
-#### Step 3: Update the notification message
-
-Once we reliably have the direct link, simplify the message:
-
-```python
-msg_lines = [
-    f"CT {chamber_name} amendment update",
-    f"Date Rec.: {row.get('date_text') or 'Unknown'}",
-    f"LCO {row['lco']}",
-    f"Bill: {row['bill_label']}",
-]
-if row.get("sched_letter"):
-    msg_lines.append(f"Sched. Ltr.: {row['sched_letter']}")
-
-if amendment_link:
-    msg_lines.append(f"Amendment: {amendment_link}")
-
-# Always include bill status as secondary reference
-msg_lines.append(f"Bill status: {status_url}")
-```
-
-#### Estimated Changes
-
-- Modify `find_amendment_pdf_on_status()` (~20 lines)
-- Update message formatting in `process_chamber()` (~5 lines)
-- No new dependencies
+The notification message now always includes the bill status URL as a secondary reference, and shows the direct amendment link when found.
 
 ---
 
@@ -314,71 +219,30 @@ def extract_amendment_text(url: str) -> str | None:
 
 This feature has three layers, each building on the previous one. They can be implemented incrementally.
 
-#### Layer A: Bill Number Watchlist (simplest, implement first)
+#### Layer A: Bill Number Watchlist -- IMPLEMENTED
 
-**Concept:** Maintain a list of bill numbers you care about. Only notify if the amendment is for one of those bills. Optionally invert to "notify on everything except these."
-
-**Configuration:**
+Bill filtering is configured via `config.json`:
 
 ```json
-// config.json
 {
-  "filter_mode": "all",
+  "filter_mode": "watchlist",
   "watched_bills": ["SB00298", "HB05032", "HB06450"],
   "ignored_bills": []
 }
 ```
 
-Where `filter_mode` is one of:
-- `"all"` — notify on every amendment (current behavior, default)
+Three filter modes are supported:
+
+- `"all"` — notify on every amendment (default)
 - `"watchlist"` — only notify on amendments to bills in `watched_bills`
 - `"blocklist"` — notify on everything except bills in `ignored_bills`
 
-**Implementation:**
+Key design decisions:
 
-```python
-CONFIG_PATH = os.environ.get(
-    "CT_AMEND_CONFIG_PATH",
-    os.path.join(os.path.dirname(__file__), "config.json"),
-)
-
-def load_config():
-    defaults = {"filter_mode": "all", "watched_bills": [], "ignored_bills": []}
-    if not os.path.exists(CONFIG_PATH):
-        return defaults
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return {**defaults, **data}
-    except Exception:
-        return defaults
-
-def should_notify(bill_label: str, config: dict) -> bool:
-    mode = config.get("filter_mode", "all")
-    bill_upper = bill_label.upper().strip()
-
-    if mode == "watchlist":
-        return bill_upper in {b.upper().strip() for b in config.get("watched_bills", [])}
-    elif mode == "blocklist":
-        return bill_upper not in {b.upper().strip() for b in config.get("ignored_bills", [])}
-    else:
-        return True  # "all" mode
-```
-
-Then in `process_chamber()`, wrap the notification block:
-
-```python
-config = load_config()
-
-for row in reversed(new_rows):
-    if not should_notify(row["bill_label"], config):
-        if DEBUG:
-            print(f"[debug] skipping {row['bill_label']} LCO {row['lco']} (filtered)")
-        continue
-    # ... existing notification logic ...
-```
-
-**Important:** State tracking (`last_seen` LCO) must still advance past filtered amendments. The filter only suppresses notifications — it should not affect which LCO is stored as `last_seen`. This is already the case because `newest_lco` is set from `rows[0]` before the notification loop.
+- `load_config()` reads `config.json` with safe fallback to defaults if the file is missing or malformed
+- `should_notify_bill()` handles case-insensitive comparison
+- The filter runs inside the notification loop *after* state has advanced, so filtered amendments are still marked as seen and won't re-trigger on the next run
+- Config path is overridable via `CT_AMEND_CONFIG_PATH` env var
 
 #### Layer B: Committee / Subject Filter (medium complexity)
 
@@ -571,16 +435,67 @@ No new dependencies for Layers A and B. Layer C reuses the `anthropic` SDK from 
 
 ---
 
+## Feature 4: Public Launch Package
+
+**Goal:** Once all features are coded and tested, share the tool publicly so fellow CT lobbyists can set it up themselves. The audience is semi-technical — comfortable following step-by-step instructions but unlikely to know git CLI or Python.
+
+### Checklist
+
+#### Beginner-Friendly README Rewrite
+
+The current README is developer-oriented. Rewrite it for the target audience:
+
+- **Plain-language intro** at the top: what this does, why it's useful, what you'll get (Telegram notifications with direct amendment links and AI summaries when new amendments drop)
+- **No jargon** in the setup guide — no mentions of Playwright, headless browsers, Chromium, cron, pip, etc. Just "follow these steps"
+- **GitHub Actions as the only path** — don't mention VPS/cron in the main guide (keep VPS_CRON.md as a separate doc for advanced users)
+- **Step-by-step with exact clicks:**
+  1. Create a Telegram bot (message @BotFather, walk through every prompt)
+  2. Get your chat ID (message @userinfobot or similar)
+  3. Fork the repo (point-and-click on GitHub, no terminal)
+  4. Add secrets in GitHub Settings > Secrets > Actions (name each one explicitly)
+  5. Edit `config.json` in the GitHub web editor to pick your bills
+  6. Enable the workflow (it may be disabled on fork by default — show where to click)
+  7. Verify it's working (check Actions tab, wait for first Telegram message)
+- **Troubleshooting section:** common issues like "I forked but nothing is happening" (workflow disabled on fork), "I'm not getting messages" (wrong chat ID), etc.
+- **Move technical reference** (env vars table, state tracking, project structure, dependencies) into a collapsible `<details>` section or a separate TECHNICAL.md
+
+#### Anthropic API Key Instructions (if LLM features are enabled)
+
+- How to sign up at console.anthropic.com
+- How to create an API key
+- How to add it as a GitHub secret (`ANTHROPIC_API_KEY`)
+- Note on cost expectations (fractions of a cent per summary)
+
+#### Social Media Launch
+
+**REMINDER:** Before posting, ask Claude to help draft optimized posts for each platform.
+
+Platforms to consider:
+
+- **LinkedIn** — primary audience (CT lobbyists, government affairs professionals). Post should be professional, explain the problem it solves (manually refreshing CGA pages during session), and link to the repo. Include a screenshot of a Telegram notification.
+- **X/Twitter** — shorter version, good for reaching CT politics / civic tech community
+- **CT-specific Slack/Discord communities** — if any exist for lobbyists or civic tech
+
+Post should cover:
+
+- The problem: during session, amendments drop fast and you need to catch them in real time
+- The solution: automated monitoring with Telegram notifications, direct PDF links, bill filtering, AI summaries
+- The ask: it's free, open source, takes 10 minutes to set up, no coding required
+- A screenshot or short video of the Telegram notification in action
+
+---
+
 ## Implementation Order
 
 ```
-Feature 1 (Direct Links)  ──> can be done standalone
-Feature 3A (Bill Filter)  ──> can be done standalone
-Feature 3B (Subject Filter) ──> can be done standalone
-Feature 2 (Summarization) ──> requires ANTHROPIC_API_KEY
-Feature 3C (LLM Relevance) ──> requires Feature 2
+Feature 1  (Direct Links)    ──> DONE
+Feature 3A (Bill Filter)     ──> DONE
+Feature 2  (Summarization)   ──> requires ANTHROPIC_API_KEY
+Feature 3B (Subject Filter)  ──> can be done standalone
+Feature 3C (LLM Relevance)   ──> requires Feature 2
+Feature 4  (Public Launch)   ──> after all features tested
 ```
 
-Recommended sequence: **3A -> 1 -> 2 -> 3B -> 3C**
+Recommended next: **2 -> 3B -> 3C -> 4**
 
-Bill filtering (3A) gives immediate value with the least code. Direct links (1) requires some investigation of the CGA page structure first. Summarization (2) and LLM relevance (3C) are nice-to-haves that compound in value once both are live.
+Summarization (2) adds the most user-facing value of what remains. Subject filtering (3B) is a straightforward scrape of existing page data. LLM relevance (3C) compounds in value once summarization is live. Public launch (4) is the final step once everything is working and tested.
